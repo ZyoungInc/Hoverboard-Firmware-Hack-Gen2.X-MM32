@@ -28,6 +28,7 @@ static uint32_t optnum(const char* s){    //optional positive argument, 0 = defa
 	return g&&v>0 ? (uint32_t)v : 0;
 }
 
+#if !defined(PF_HALL_ONLY) && !defined(PF_FIXED_CAL)
 //a voltage in V ("24.8", "36") or mV ("24800"): with a decimal point or below 100 it is volts; 0 = none
 static int32_t millivolts(const char* s){
 	int32_t v = 0, frac = 0, scale = 1;
@@ -116,6 +117,7 @@ static void pinCmd(const char* name, const char* mode, const char* arg){
 	else{ err("pin mode? (help)"); return; }
 	ok();
 }
+#endif
 
 void Command(char* line){
 	char* argv[5];
@@ -132,8 +134,81 @@ void Command(char* line){
 	const char* c = argv[0];
 	const char* a1 = argc>1 ? argv[1] : 0;
 	const char* a2 = argc>2 ? argv[2] : 0;
+#if !defined(PF_HALL_ONLY) && !defined(PF_FIXED_CAL)
 	const char* a3 = argc>3 ? argv[3] : 0;
+#endif
 	if(agent){ out("> "); out(line); for(uint8_t i=1;i<argc;i++){ outc(' '); out(argv[i]); } nl(); }
+#if defined(PF_HALL_ONLY) || defined(PF_FIXED_CAL)
+ if(eq(c,"help")||eq(c,"?")){
+#ifdef PF_FIXED_CAL
+  note("detect current [200..500 phase | 600 or 1400 R004 gain] | calibrate hall 1500|2000|3000|4000|5000 | calibrate rl 1500 | calibrate kv sine 5000 | hall | shunt | get <name>; RAM only");
+#else
+  note("calibrate hallmap [mV] | hall | shunt | get <name>; mapping is RAM only");
+#endif
+  ok();
+ }
+#ifdef PF_HALL_ONLY
+ else if(eq(c,"calibrate")&&a1&&eq(a1,"hallmap")) CalHallMap((int32_t)optnum(a2));
+#endif
+#ifdef PF_FIXED_CAL
+ else if(eq(c,"calibrate")&&a1&&eq(a1,"hall")){
+  int32_t mv=(int32_t)optnum(a2);
+  if(mv!=1500&&mv!=2000&&mv!=3000&&mv!=4000&&mv!=5000){ err("fixed Hall-angle calibration uses 1500..5000 mV"); return; }
+  CalHall(mv);
+ }
+ else if(eq(c,"calibrate")&&a1&&eq(a1,"rl")){
+  int32_t mv=(int32_t)optnum(a2);
+  if(mv!=1500){ err("fixed RL calibration uses 1500 mV"); return; }
+  if(IPHASE_CFG==0xFFFF){ err("run detect current 500 first to set phase mapping in RAM"); return; }
+  CalRL(mv);
+ }
+ else if(eq(c,"calibrate")&&a1&&eq(a1,"kv")){
+  const char* kind = a2;
+  int32_t top = (int32_t)optnum(argc>3 ? argv[3] : 0);
+  if(!kind||!eq(kind,"sine")||top!=5000){ err("fixed Kv calibration uses: calibrate kv sine 5000"); return; }
+  CalKv("sine", top);
+ }
+ else if(eq(c,"detect")&&a1&&eq(a1,"current")){
+  if(ITOTALPIN!=PA7||IPHASEAPIN!=PA2||IPHASEBPIN!=PA6){ err("fixed PA7/PA2/PA6 config required"); return; }
+  int32_t vb=VbatMv();
+  if(vb<35000||vb>43000){ err("bus voltage outside 35..43 V"); return; }
+  int32_t mv=(int32_t)optnum(a2);
+  if(!mv) mv=200;
+  if((mv<200||mv>500)&&mv!=600&&mv!=1400){ err("field voltage: 200..500 phase, 600 or 1400 R004 gain"); return; }
+  note(mv==1400 ? "fixed PA2/PA6 and R004 gain; field max 3500 mV; phase ADC guard; wheel may move" :
+       mv==600 ? "fixed PA2/PA6 and R004 gain; field max 1500 mV; wheel may move" :
+                 "fixed PA2/PA6 phase mapping only; wheel may move");
+  DetectCurrent(mv,4000);
+ }
+#endif
+	else if(eq(c,"shunt")){
+		if(TIM1->BDTR&TIM_BDTR_MOEN){ err("bridge must be off"); return; }
+		int8_t ch=AdcChannel(ITOTALPIN);
+		if(ch<0){ err("bus shunt adc pin required"); return; }
+		pinMode(ITOTALPIN,INPUT_ADC);
+		uint16_t lo=4095, hi=0;
+		uint32_t sum=0;
+		for(uint8_t i=0;i<32;i++){
+			AdcScan(1u<<ch);
+			uint16_t sample=AdcValue((uint8_t)ch);
+			if(sample<lo) lo=sample;
+			if(sample>hi) hi=sample;
+			sum+=sample;
+		}
+		kvi("shunt_min",lo); kvi("shunt_max",hi); kvi("shunt_mean",(int32_t)(sum/32));
+		kvmv("bus",VbatMv()); ok();
+	}
+	else if(eq(c,"hall")){
+		kvi("hall",HallState());
+		kvi("a",digitalRead(HALLAPIN)); kvi("b",digitalRead(HALLBPIN)); kvi("c",digitalRead(HALLCPIN));
+		ok();
+	}
+	else if(eq(c,"get")){
+		int16_t idx=a1 ? CfgIndex(a1) : -1;
+		if(idx<0) err("unknown name"); else{ CfgPrint((uint8_t)idx); ok(); }
+	}
+ else err("fixed board calibration commands only");
+#else
 	if(eq(c, "help")||eq(c, "?")){ help(); ok(); }
 	else if(eq(c, "info")){ Info(); ok(); }
 	else if(eq(c, "list")){ for(uint8_t i=0;i<128;i++) if(CfgName(i)) CfgPrint(i); ok(); }
@@ -183,4 +258,5 @@ void Command(char* line){
 	else if(eq(c, "tui")){ agent = 0; TuiStart(); }
 	else if(eq(c, "agent")){ agent = 1; ok(); }
 	else err("unknown command (help)");
+#endif
 }

@@ -74,8 +74,8 @@ static int32_t fwId;               //field weakening d current, mA (<= 0)
 volatile int32_t focIdNow;         //the d current reference applied, mA (electrical frame)
 
 volatile int32_t focIdRef;
-volatile int16_t focId, focIq;
-volatile int16_t focIqF, focIdF;   //focIq, focId averaged over ~32 periods (7 ms), telemetry
+volatile int32_t focId, focIq;
+volatile int32_t focIqF, focIdF;   //mA; 40 A settings must not wrap 16-bit telemetry
 static int32_t iqAcc, idAcc;
 static uint8_t sampleOk;           //this period's phase currents are valid
 static int32_t itotalPhase;        //the last bus current from them (sine above MOD_MAX keeps it)
@@ -187,7 +187,7 @@ static void trace(int32_t id, int32_t iq, int32_t vd, int32_t vq, int16_t th, in
 #define trace(id, iq, vd, vq, th, idRef, iqRef) ((void)0)
 #define TRACE_FREEZE() ((void)0)
 #endif
-volatile int16_t focTripI[3];    //phase currents of the sample that tripped, mA
+volatile int32_t focTripI[3];    //phase currents of the sample that tripped, mA
 static int32_t median9(const int16_t* h){    //insertion sort of a copy
 	int16_t v[HIST];
 	for(uint8_t i=0;i<HIST;i++){
@@ -375,7 +375,7 @@ static void park(int32_t* id, int32_t* iq, int16_t thS){
 	if(pk>trip){
 		if(++tripN>=2){
 			focTrip = 1;
-			focTripI[0] = (int16_t)ia; focTripI[1] = (int16_t)ib; focTripI[2] = (int16_t)ic;
+			focTripI[0] = ia; focTripI[1] = ib; focTripI[2] = ic;
 			TRACE_FREEZE();
 		}
 	}else{
@@ -384,12 +384,12 @@ static void park(int32_t* id, int32_t* iq, int16_t thS){
 	//bus current = sum of duty * phase current; the CCRs read back are the ones active in this period
 	int32_t n = (int32_t)PWM_PERIOD;
 	itotalPhase = ((n-(int32_t)TIM1->CCR1)*ia+(n-(int32_t)TIM1->CCR2)*ib+(n-(int32_t)TIM1->CCR3)*ic)/n/10;
-	focId = (int16_t)*id;
-	focIq = (int16_t)-*iq;
+	focId = *id;
+	focIq = -*iq;
 	iqAcc += focIq-(iqAcc>>5);
-	focIqF = (int16_t)(iqAcc>>5);
+	focIqF = iqAcc>>5;
 	idAcc += focId-(idAcc>>5);
-	focIdF = (int16_t)(idAcc>>5);
+	focIdF = idAcc>>5;
 }
 
 void FocObserve(void){    //sine: I_d / I_q for telemetry
@@ -621,8 +621,8 @@ int32_t FocSpeedCtrl(int32_t sp, int32_t meas, uint8_t filt){
 	int32_t imax = IMAX()<<8;
 	spT = millis;
 	if(dt>20) dt = 20;
-	if(sp>1000) sp = 1000; else if(sp<-1000) sp = -1000;
-	if(meas>1000) meas = 1000; else if(meas<-1000) meas = -1000;
+	if(sp>3000) sp = 3000; else if(sp<-3000) sp = -3000;
+	if(meas>3000) meas = 3000; else if(meas<-3000) meas = -3000;
 	if(!spRun){    //bumpless from the speed the wheel has
 		spRef = meas<<8;
 		spRun = 1;
@@ -648,7 +648,7 @@ int32_t FocSpeedCtrl(int32_t sp, int32_t meas, uint8_t filt){
 		int32_t am = meas<0 ? -meas : meas, g = am<=60 ? 100 : (am>=200 ? 30 : 100-(am-60)/2);    //percent*3
 		kp = kp*g/30; ki = ki*g/30;
 	}
-	if(kp>1000) kp = 1000;    //kp*e*256 in 32 bit (e <= 2000 rpm)
+	if(kp>1000) kp = 1000;    //kp*e*256 stays in 32 bit with e <= 6000 rpm
 	if(ki>1000) ki = 1000;
 	int32_t di = ki*e*256/1000*dt;
 	int32_t u = kp*e*256+spI+di;

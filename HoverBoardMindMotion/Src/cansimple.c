@@ -91,7 +91,7 @@ __attribute__((noinline)) int32_t StepsPerTurn(void){ return 3*(int32_t)WINDINGS
 float TorqueConstant(void){    //Nm per A (amplitude of the phase current)
 	int32_t kt = cfgDef(TORQUE_CONST, 0);
 	if(!kt){    //from the sine kv (0.1 rpm/V at 100 % modulation): 8.27 / kv, as ODrive's estimate
-		int32_t kv = SINE_KV ? SINE_KV : 242;
+		int32_t kv = cfgDef(SINE_KV, 242);
 		return 82.7f/(float)kv;
 	}
 	return (float)kt/1000.0f;
@@ -142,7 +142,7 @@ static uint8_t setAxisState(uint32_t st){
 //(rpm, 0.01 A, permille), taken in its control mode only; returns 1 if taken
 static const uint8_t inCtl[3] = { CTRL_SPEED, CTRL_TORQUE, CTRL_PWM };
 static __attribute__((noinline)) uint8_t inputCmd(uint8_t k, float f){
-	static const uint16_t lim[3] = { 1000, 30000, 1000 };
+	static const uint16_t lim[3] = { 3000, 30000, 1000 };
 	float x = k==0 ? f*60.0f : (k==1 ? f/TorqueConstant()*100.0f : f*1000.0f);
 	if(CONTROL(DRIVEMODE)!=inCtl[k]) return 0;
 	speed = clampF(x, lim[k]);
@@ -253,7 +253,7 @@ static void handle(uint8_t node, uint8_t cmdByte, const uint8_t* d, uint8_t len)
 		case CMD_SET_LIMITS:
 			if(len>=8){
 				float v = rdF(d), i = rdF(d+4);
-				if(v>0) POS_RPM = (uint16_t)clampF(v*60.0f, 1000);    //position speed limit, rpm
+				if(v>0) POS_RPM = (uint16_t)clampF(v*60.0f, 3000);    //position speed limit, rpm
 				if(i>0) FOC_IMAX = (uint16_t)clampF(i*10.0f, 600);    //0.1 A
 			}
 			break;

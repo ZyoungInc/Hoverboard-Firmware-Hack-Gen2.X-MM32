@@ -75,15 +75,24 @@ def main():
     a = ap.parse_args()
     pf = PinFinder(a.port, a.baud, a.verbose)
     failed = False
-    for c in a.commands:
-        good, res, lines = pf.cmd(c, a.timeout)
-        failed |= not good
-        if a.json:
-            print(json.dumps({"command": c, "ok": good, "results": res, "lines": lines}))
-        else:
-            for ln in lines:
-                print(ln)
-    pf.close()
+    try:
+        for c in a.commands:
+            good, res, lines = pf.cmd(c, a.timeout)
+            failed |= not good
+            if a.json:
+                print(json.dumps({"command": c, "ok": good, "results": res, "lines": lines}))
+            else:
+                for ln in lines:
+                    print(ln)
+    except KeyboardInterrupt:
+        # A running motor calibration polls the UART for any key and drops MOE
+        # immediately on abort. Closing the host port alone does not stop it.
+        pf.s.write(b"\n")
+        pf.s.flush()
+        print("Abort key sent to PinFinder; cut bench power if motion continues.", file=sys.stderr)
+        sys.exit(130)
+    finally:
+        pf.close()
     sys.exit(1 if failed else 0)
 
 

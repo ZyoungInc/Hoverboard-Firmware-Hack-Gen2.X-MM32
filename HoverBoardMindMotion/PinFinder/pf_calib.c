@@ -46,12 +46,68 @@ static void edgePoll(void){
 	edgePrev = h;
 }
 
+#ifdef PF_FIXED_CAL
+//PinFinder's VbatMv() is one unfiltered ADC scan. The main firmware filters
+//occasional Vref/battery glitches; use a median here so a lone bad conversion
+//does not abort a long Hall scan. A sustained supply excursion still aborts.
+static int32_t calBusMv(void){
+	int32_t v[5];
+	for(uint8_t i=0;i<5;i++){
+		int32_t x = VbatMv();
+		int8_t j = (int8_t)i-1;
+		while(j>=0&&v[j]>x){ v[j+1] = v[j]; j--; }
+		v[j+1] = x;
+	}
+	return v[2];
+}
+
+static int32_t phaseMaxCounts;
+static int32_t phaseLimitCounts;
+static uint8_t hallPhaseOver(int8_t a, int8_t b, int32_t zeroA, int32_t zeroB){
+	uint8_t over = 0;
+	for(uint8_t i=0;i<5;i++){
+		AdcScanTriggered(1u<<a|1u<<b);
+		int32_t da = (int32_t)AdcValue((uint8_t)a)-zeroA;
+		int32_t db = (int32_t)AdcValue((uint8_t)b)-zeroB;
+		if(da<0) da = -da;
+		if(db<0) db = -db;
+		if(da>phaseMaxCounts) phaseMaxCounts = da;
+		if(db>phaseMaxCounts) phaseMaxCounts = db;
+		if(da>phaseLimitCounts||db>phaseLimitCounts) over++;
+	}
+	return over>=3;
+}
+#endif
+
 //---------------------------------------------------------------- hall edge angles
 //The field turns 2 electrical turns forward and back in 1 deg steps (10 ms each); the rotor follows with
 //some lag, so an edge is seen at a larger field angle forward and a smaller one backward: the edge is the
 //mean of both (as hallcal.py did over SWD). HALL_ANG(h) = the edge where state h starts with rising angle.
 void CalHall(int32_t mv){
 	if(!hallsSet()) return;
+#ifdef PF_FIXED_CAL
+	if(mv!=1500&&mv!=2000&&mv!=3000&&mv!=4000&&mv!=5000){ err("fixed Hall-angle calibration uses 1500..5000 mV"); return; }
+	phaseLimitCounts = mv/20;
+	if(phaseLimitCounts<100) phaseLimitCounts = 100;    //about 3.5..8.9 A at the measured gain
+	int32_t vb=calBusMv();
+	if(vb<35000||vb>43000){ err("bus voltage outside 35..43 V"); return; }
+	int8_t phaseA=AdcChannel(IPHASEAPIN), phaseB=AdcChannel(IPHASEBPIN);
+	if(phaseA<0||phaseB<0){ err("phase ADC pins missing"); return; }
+	pinMode(IPHASEAPIN, INPUT_ADC);
+	pinMode(IPHASEBPIN, INPUT_ADC);
+	FieldAngle(0, 0);
+	Wait(50);
+	int32_t zeroA=0, zeroB=0;
+	for(uint8_t i=0;i<16;i++){
+		AdcScanTriggered(1u<<phaseA|1u<<phaseB);
+		zeroA+=AdcValue((uint8_t)phaseA);
+		zeroB+=AdcValue((uint8_t)phaseB);
+	}
+	zeroA/=16;
+	zeroB/=16;
+	phaseMaxCounts = 0;
+	if(aborted()||calBusMv()<35000||calBusMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 	if(mv<=0) mv = 1000;
 	int32_t sum[2][8], ref[8];
 	uint8_t n[2][8];
@@ -59,7 +115,27 @@ void CalHall(int32_t mv){
 	note("wheel turns slowly both ways; keep it free");
 	int32_t pos = 0;
 	FieldAngle(0, mv);
+	#ifdef PF_FIXED_CAL
+	uint8_t badPhase = 0, badBus = 0, earlyAbort = 0;
+	int32_t badBusMv = 0;
+	for(uint8_t i=0;i<8;i++){
+		Wait(50);
+		if(hallPhaseOver(phaseA, phaseB, zeroA, zeroB)){ badPhase = 1; break; }
+		int32_t v=calBusMv();
+		if(v<35000||v>43000){ badBus = 1; badBusMv = v; break; }
+		if(aborted()){ earlyAbort = 1; break; }
+	}
+	if(badPhase||badBus||earlyAbort){
+		GatesOff();
+		kvi("phase_max_counts", phaseMaxCounts);
+		kvi("phase_limit_counts", phaseLimitCounts);
+		if(badBus) kvmv("bus_fault", badBusMv);
+		err(badPhase ? "phase ADC excursion exceeded limit" : badBus ? "bus voltage left 35..43 V" : "stopped");
+		return;
+	}
+	#else
 	Wait(400);
+#endif
 	uint8_t prev = HallState(), stop = 0;
 	for(uint8_t back=0;back<2&&!stop;back++){
 		for(uint16_t i=0;i<720&&!stop;i++){
@@ -78,11 +154,32 @@ void CalHall(int32_t mv){
 			prev = h;
 			if(i%90==89) progress(back*8+i/90+1, 16);
 			stop = aborted();
+#ifdef PF_FIXED_CAL
+			if(hallPhaseOver(phaseA, phaseB, zeroA, zeroB)){ badPhase = 1; stop = 1; }
+			if(i%10==9){
+				int32_t v=calBusMv();
+				if(v<35000||v>43000){ badBus = 1; badBusMv = v; stop = 1; }
+			}
+#endif
 		}
 	}
 	GatesOff();
 	progressEnd();
-	if(stop){ err("stopped"); return; }
+	if(stop){
+#ifdef PF_FIXED_CAL
+		kvi("phase_max_counts", phaseMaxCounts);
+		kvi("phase_limit_counts", phaseLimitCounts);
+		if(badBus) kvmv("bus_fault", badBusMv);
+		err(badPhase ? "phase ADC excursion exceeded limit" : badBus ? "bus voltage left 35..43 V" : "stopped");
+#else
+		err("stopped");
+#endif
+		return;
+	}
+	#ifdef PF_FIXED_CAL
+	kvi("phase_max_counts", phaseMaxCounts);
+	kvi("phase_limit_counts", phaseLimitCounts);
+	#endif
 	uint16_t ang[7];
 	for(uint8_t h=1;h<=6;h++){
 		if(!n[0][h]||!n[1][h]){ err("hall states not seen both ways (more mV)"); return; }
@@ -171,15 +268,29 @@ static int32_t curRead(int32_t* i3, uint8_t n){
 //0 to mv in one step, the current sampled every pwm period: the area between the final current and the
 //rise is I x tau, L = R x tau (d axis).
 void CalRL(int32_t mv){
+#ifdef PF_FIXED_CAL
+	if(mv!=1500){ err("fixed RL calibration uses 1500 mV"); return; }
+	int32_t vb=calBusMv();
+	if(vb<35000||vb>43000){ err("bus voltage outside 35..43 V"); return; }
+#endif
 	if(mv<=0) mv = 1000;
 	if(!curInit()) return;
+#ifdef PF_FIXED_CAL
+	if(aborted()||calBusMv()<35000||calBusMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 	uint16_t th = (uint16_t)(phA*21845);    //phase phA's direction: its current is the largest
 	int32_t i3[3], cur[2];
 	FieldAngle(th, mv);
 	Wait(300);    //align
+#ifdef PF_FIXED_CAL
+	if(aborted()||calBusMv()<35000||calBusMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 	for(uint8_t s=0;s<2;s++){
 		FieldAngle(th, s ? mv : mv/2);
 		Wait(80);
+#ifdef PF_FIXED_CAL
+		if(aborted()||calBusMv()<35000||calBusMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 		cur[s] = curRead(i3, 32);
 		kv("current_ma"); outi(cur[s]); out(agent ? " mv " : " mA at mV "); outi(s ? mv : mv/2); nl();
 	}
@@ -189,6 +300,9 @@ void CalRL(int32_t mv){
 	static int16_t smp[64];
 	FieldAngle(th, 0);
 	Wait(30);
+#ifdef PF_FIXED_CAL
+	if(aborted()||calBusMv()<35000||calBusMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 	uint32_t m = 1u<<chA|1u<<chB;
 	AdcScanTriggered(m);
 	FieldAngle(th, mv);    //takes effect at the next update, with the next sample
@@ -220,10 +334,32 @@ void CalRL(int32_t mv){
 static int32_t speedRun(void (*drive)(int32_t), int32_t level, uint32_t ms){
 	edgePrev = HallState();
 	uint32_t t0 = millis;
-	while(millis-t0<1500){ drive(level); if(aborted()) return -999999; }    //accelerate
+	uint32_t checked = t0;
+	while(millis-t0<1500){
+		drive(level);
+		if(aborted()) return -999999;
+#ifdef PF_FIXED_CAL
+		if(millis-checked>=50){
+			checked = millis;
+			int32_t vb = calBusMv();
+			if(vb<35000||vb>43000) return -999999;
+		}
+#endif
+	}    //accelerate
 	edgeCount = 0;
 	t0 = millis;
-	while(millis-t0<ms){ drive(level); edgePoll(); }
+	while(millis-t0<ms){
+		drive(level);
+		edgePoll();
+#ifdef PF_FIXED_CAL
+		if(aborted()) return -999999;
+		if(millis-checked>=50){
+			checked = millis;
+			int32_t vb = calBusMv();
+			if(vb<35000||vb>43000) return -999999;
+		}
+#endif
+	}
 	int32_t e = edgeCount<0 ? -edgeCount : edgeCount;
 	return e*60000/(int32_t)ms/(3*(int32_t)WINDINGS);
 }

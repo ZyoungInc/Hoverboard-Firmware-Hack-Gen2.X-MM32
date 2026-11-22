@@ -84,6 +84,7 @@ void CfgDefaults(void);
 
 //pf_detect.c: the detections; each prints results and ends with ok() / err()
 void DetectHall(int32_t mv);
+void CalHallMap(int32_t mv);            //known three Hall pins only; find their motor-phase order
 void HwCheck(void);                     //warnings: detected pins the main firmware's peripherals cannot use
 void DetectVbat(int32_t expect_mv);
 void DetectCurrent(int32_t mv, int32_t shunt_uohm);

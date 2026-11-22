@@ -73,6 +73,11 @@ class Mm32:
         values, a static voltage vector (against the back emf at speed). Its main output enable (and the
         automatic one, which would set it again at the next update) is cleared first; resume() sets them
         back. DBGMCU's TIMx_STOP only freezes the counter, which can leave a phase switched on."""
+        # At a 10 kHz SWD clock, saving core registers and 4 KB RAM can take longer than the
+        # firmware's ~500 ms watchdog period. Freeze it before halting or the target resets
+        # halfway through the register reads (often at r12) and loses its power latch.
+        self.w(RCC + 0x18, self.r(RCC + 0x18) | RCC_APB2ENR_DBGMCU)
+        self.w(DBGMCU_CR, self.r(DBGMCU_CR) | DBGMCU_CR_IWDG_STOP)
         self.t.halt()
         self.saved_bdtr = self.r(TIM1_BDTR)
         self.w(TIM1_BDTR, self.saved_bdtr & ~(BDTR_MOE | BDTR_AOE))
@@ -84,8 +89,6 @@ class Mm32:
         self.saved_dma = [(ccr, self.r(ccr)) for ccr in DMA1_CCR]
         for ccr, v in self.saved_dma:
             self.w(ccr, v & ~1)
-        self.w(RCC + 0x18, self.r(RCC + 0x18) | RCC_APB2ENR_DBGMCU)
-        self.w(DBGMCU_CR, self.r(DBGMCU_CR) | DBGMCU_CR_IWDG_STOP)
         self.feed()
 
     def resume(self):
@@ -169,6 +172,8 @@ class Mm32:
                 self.program_at(FLASH_BASE + off, chunk)
 
     def soft_start(self):
+        if self.t.get_state().name != "HALTED":
+            raise RuntimeError("soft_start requires a halted core")
         for off in (0x0C, 0x10):                            # APB2RSTR, APB1RSTR
             self.w(RCC + off, 0xFFFFFFFF)
             self.w(RCC + off, 0)
@@ -219,7 +224,7 @@ def main():
 
     session = ConnectHelper.session_with_chosen_probe(
         unique_id=a.probe, target_override="cortex_m", frequency=a.frequency,
-        options={"connect_mode": "attach", "resume_on_disconnect": True})
+        options={"connect_mode": "attach", "resume_on_disconnect": True, "auto_unlock": False})
     session.open()
     mcu = Mm32(session.target)
     try:

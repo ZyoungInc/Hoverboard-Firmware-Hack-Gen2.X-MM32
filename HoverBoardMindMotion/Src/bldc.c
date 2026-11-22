@@ -18,7 +18,7 @@
 
 static volatile uint16_t abspwm;
 volatile uint32_t lastcommutate;
-volatile uint8_t gatesoff=0;
+volatile uint8_t gatesoff=1;    //keep the bridge disarmed until a control step explicitly arms it
 volatile uint8_t coastreq=0;
 volatile uint8_t blockbrake=0;    //block commutation: low side short brake active, the hall isr does not commutate
 static volatile uint16_t regenMax = 1001;    //RegenShort(): the duty limit for the current limit (speedupdate)
@@ -30,7 +30,7 @@ static uint32_t inT;              //last speedupdate(), for the input modes
 static int32_t vRamp;             //pwm control: the applied command, permille, slewed (VOLT_SLEW)
 #define VOLT_SLEW 1               //permille per ms: full scale in 1 s
 volatile uint8_t cmdSource = 1;   //protocol of the last command frame: 1 v1 ('/'), 2 CANSimple
-volatile uint8_t axisState = AXIS_CLOSED_LOOP;    //ODrive AxisState: IDLE 1 = gates off, CLOSED_LOOP 8
+volatile uint8_t axisState = AXIS_IDLE;    //ODrive AxisState: IDLE 1 = gates off, CLOSED_LOOP 8
 volatile uint32_t axisErrors;     //ODrive Error bits, the conditions active now (see bldc.h)
 volatile uint32_t axisDisarm;     //the error that switched the axis to IDLE, until Clear_Errors
 volatile uint8_t posDone;         //position mode: at the target
@@ -149,7 +149,7 @@ void speedupdate(void){
 		}
 		//armed: v1 frames arm and disarm with state bit 64, CANSimple with the axis state (a v1 master
 		//cannot set that). A disarm by error (Estop) holds for both until Clear_Errors.
-		uint8_t idle = cmdSource==1 ? (wState & STATE_DISABLE)!=0 : axisState==AXIS_IDLE;
+		uint8_t idle = cmdSource==1 ? (wState & STATE_DISABLE) : axisState==AXIS_IDLE;
 		uint8_t ft = focTrip;    //read once: a trip set by the isr after this is not cleared unseen (below)
 		//a phase current trip disarms a CANSimple axis until Clear_Errors (ODrive): it only comes when the
 		//pullback limit (foc.c, CurrentPullback) could not pull the current back, a loss of control. Clearing it
@@ -535,11 +535,9 @@ uint8_t RegenShort(uint8_t over){
 //TIM1 main output enable for all six gates. AOEN goes with MOEN: with automatic output enable set,
 //the timer sets MOEN again at the next update event and a software "off" lasts only one pwm period.
 __attribute__((noinline)) void gatesOutput(uint8_t on){
-	if(on){
-		TIM1->BDTR |= TIM_BDTR_AOEN|TIM_BDTR_MOEN;
-	}else{
-		TIM1->BDTR &= ~(TIM_BDTR_AOEN|TIM_BDTR_MOEN);
-	}
+	uint32_t bdtr = TIM1->BDTR;
+	const uint32_t enable = TIM_BDTR_AOEN|TIM_BDTR_MOEN;
+	TIM1->BDTR = on ? bdtr|enable : bdtr&~enable;
 }
 
 //Change the drive mode while the motor may be running. The adc isr reads DRIVEMODE several times per

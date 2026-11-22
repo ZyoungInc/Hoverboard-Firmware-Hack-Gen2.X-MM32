@@ -33,8 +33,8 @@ int32_t CurrentPullback(void);       //mA, above it the current is pulled back (
 int32_t CurrentImax(void);           //mA, the current limit in use (current_soft_max, below the pullback)
 
 extern volatile int32_t focIdRef;     //d current reference, mA (field weakening, tests over SWD)
-extern volatile int16_t focId, focIq; //measured, mA
-extern volatile int16_t focIqF, focIdF;    //I_q, I_d averaged over ~7 ms, mA (telemetry)
+extern volatile int32_t focId, focIq; //measured, mA
+extern volatile int32_t focIqF, focIdF;    //I_q, I_d averaged over ~7 ms, mA (telemetry)
 int32_t FocFieldWeakening(void);    //field weakening d current, mA (<= 0)
 extern volatile int32_t focIdNow;    //d current reference applied, mA
 extern volatile uint8_t focTrip;      //phase current above the trip level: gates off until the command is 0

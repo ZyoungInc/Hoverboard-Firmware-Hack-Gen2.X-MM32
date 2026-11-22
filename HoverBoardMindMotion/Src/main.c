@@ -35,7 +35,7 @@ volatile uint8_t powerOffReq;    //CANSimple hoverboard.power_off: the power but
 volatile int speed=0;
 volatile int pwm=0;
 volatile int realspeed=0;
-volatile uint8_t  wState = STATE_LED_BATTLEVEL;    //battery LEDs until the remote sends a state
+volatile uint8_t  wState = STATE_LED_BATTLEVEL|STATE_DISABLE;    //boot disarmed until the remote explicitly arms
 static uint8_t flicker=0;
 volatile uint8_t charging;    //charger connected (CHARGEPIN, debounced)
 volatile uint8_t footPads;    //infrared foot sensors covered: bit k = IR_PIN(k) (debounced)
@@ -156,10 +156,14 @@ s32 main(void){
 	PWM_GEN_init(&pwm_gen);
 	HALLModuleInit(&HALL1);
 	FocInit();
+#ifndef GHOST_GEN242
 	ImuInit();    //configured IMU pins: the chip set up, read in the main loop
+#endif
   while(1) {
 		RemotePoll();    //received frames and replies, as soon as they arrive
+#ifndef GHOST_GEN242
 		ImuPoll();
+#endif
 		uint8_t state = wState;
 		digitalWrite(LEDUPIN, (state&STATE_LED_UP)!=0);    //unconfigured pins are ignored
 		digitalWrite(LEDDPIN, (state&STATE_LED_DOWN)!=0);

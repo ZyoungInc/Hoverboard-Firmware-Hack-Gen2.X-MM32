@@ -318,4 +318,4 @@ uint16_t analogRead(uint16_t io){    //the last conversion of the pin's channel;
 }
 
 __attribute__((noinline)) int32_t cfgDef(uint16_t v, int32_t def){ return cfgOrDefault(v, def); }
-__attribute__((noinline)) int cfgFlag(uint16_t v, int def){ return cfgBool(v, def); }
+int cfgFlag(uint16_t v, int def){ return cfgBool(v, def); }

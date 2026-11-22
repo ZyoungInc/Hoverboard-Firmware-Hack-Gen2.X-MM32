@@ -61,6 +61,79 @@ static int8_t leadScore(const uint16_t* bit, const uint16_t* sure, const uint8_t
 	return score;
 }
 
+#if defined(PF_HALL_ONLY) || defined(PF_FIXED_CAL)
+//The connector pins are known on Ghost Gen2.4.2; only the assignment to motor phases is unknown.
+//Reuse DetectHall's twelve static field directions and leadScore(), with no GPIO search or auto
+//voltage increase. No result is saved to flash until the host explicitly rebuilds the main image.
+void CalHallMap(int32_t mv){
+	uint8_t pins[3] = { HALLAPIN, HALLBPIN, HALLCPIN };
+	if(pins[0]>=PINCOUNT||pins[1]>=PINCOUNT||pins[2]>=PINCOUNT||
+	   pins[0]==pins[1]||pins[1]==pins[2]||pins[0]==pins[2]){ err("three distinct hall pins required"); return; }
+	if(!mv) mv = 500;
+	if(mv<200||mv>1500){ err("field voltage must be 200..1500 mV"); return; }
+	int8_t ch = AdcChannel(ITOTALPIN);
+	if(ch<0){ err("bus shunt adc pin required"); return; }
+	int32_t vb = VbatMv();
+	if(vb<35000||vb>43000){ err("bus voltage outside 35..43 V"); return; }
+	for(uint8_t i=0;i<3;i++) pinMode(pins[i], INPUT_PULLUP);
+	pinMode(ITOTALPIN, INPUT_ADC);
+	AdcScan(1u<<ch);
+	uint16_t zero = AdcValue((uint8_t)ch);
+	uint16_t peak = zero;
+	uint8_t cnt[3][12] = {{0}};
+	for(uint8_t turn=0;turn<4;turn++){
+		for(uint8_t k=0;k<12;k++){
+			FieldVector(k, mv);
+			uint32_t start = millis;
+			while(millis-start<100){
+				AdcScan(1u<<ch);
+				uint16_t sample = AdcValue((uint8_t)ch);
+				if(sample>peak) peak = sample;    //telemetry only in this dedicated Hall-mapping build
+				if(aborted()){ GatesOff(); kvi("shunt_max",peak); err("stopped"); return; }
+			}
+			for(uint8_t i=0;i<3;i++) cnt[i][k] += digitalRead(pins[i]);
+			vb = VbatMv();
+			if(vb<35000||vb>43000){ GatesOff(); kvi("shunt_max",peak); err("bus voltage left 35..43 V"); return; }
+		}
+		progress(turn+1, 4);
+	}
+	GatesOff();
+	progressEnd();
+	kvi("shunt_zero",zero); kvi("shunt_max",peak);
+	uint16_t bit[PINCOUNT] = {0}, sure[PINCOUNT] = {0};
+	for(uint8_t i=0;i<3;i++){
+		uint8_t ones=0, edges=0;
+		for(uint8_t k=0;k<12;k++){
+			if(cnt[i][k]>=3) bit[pins[i]] |= (uint16_t)(1u<<k);
+			if(cnt[i][k]==0||cnt[i][k]==4) sure[pins[i]] |= (uint16_t)(1u<<k);
+		}
+		for(uint8_t k=0;k<12;k++){
+			ones += (uint8_t)((bit[pins[i]]>>k)&1);
+			edges += (uint8_t)(((bit[pins[i]]>>k)^(bit[pins[i]]>>((k+1)%12)))&1);
+		}
+		if(ones<4||ones>8||edges!=2){ err("rotor did not follow the field"); return; }
+	}
+	int8_t best=-1, bestInv=-1;
+	uint8_t pick[3]={0}, pickInv[3]={0};
+	for(uint8_t i=0;i<3;i++) for(uint8_t j=0;j<3;j++) for(uint8_t k=0;k<3;k++){
+		if(i==j||j==k||i==k) continue;
+		uint8_t p[3]={pins[i],pins[j],pins[k]};
+		int8_t sc=leadScore(bit,sure,p,0);
+		if(sc>best){ best=sc; for(uint8_t n=0;n<3;n++) pick[n]=p[n]; }
+		sc=leadScore(bit,sure,p,1);
+		if(sc>bestInv){ bestInv=sc; for(uint8_t n=0;n<3;n++) pickInv[n]=p[n]; }
+	}
+	uint8_t inv=best<0&&bestInv>=0;
+	if(inv){ best=bestInv; for(uint8_t n=0;n<3;n++) pick[n]=pickInv[n]; }
+	if(best<0){ err("no hall assignment fits the motor phases"); return; }
+	HALLAPIN=pick[0]; HALLBPIN=pick[1]; HALLCPIN=pick[2];
+	HALL_INVERT=inv ? 2 : 1;
+	kvp("halla",HALLAPIN); kvp("hallb",HALLBPIN); kvp("hallc",HALLCPIN);
+	kvi("hallinvert",HALL_INVERT); kvi("lead90",best); kvmv("field",mv);
+	ok();
+}
+#endif
+
 void DetectHall(int32_t mv){
 	uint16_t old[3] = { HALLAPIN, HALLBPIN, HALLCPIN };
 	static uint8_t cnt[PINCOUNT][12];
@@ -576,10 +649,17 @@ static uint32_t freeAdcMask(void){
 	uint32_t m = 0;
 	for(uint8_t i=0;i<ADCCOUNT;i++){
 		uint16_t p = adcs[i].io;
+#ifdef PF_FIXED_CAL
+		//Ghost's three known analog pins only: no PCB pin search in this build.
+		if(p!=IPHASEAPIN&&p!=IPHASEBPIN&&p!=ITOTALPIN) continue;
+#else
 		if(PinFree(p)||p==ITOTALPIN||p==IPHASEAPIN||p==IPHASEBPIN){
+#endif
 			pinMode((uint8_t)p, INPUT_ADC);
 			m |= 1u<<adcs[i].channel;
+#ifndef PF_FIXED_CAL
 		}
+#endif
 	}
 	return m;
 }
@@ -591,6 +671,23 @@ static void sampleAvg(uint32_t mask, uint16_t at, int32_t* avg, uint16_t n){    
 		for(uint8_t c=0;c<16;c++) if(mask>>c&1) avg[c] += AdcValue(c);
 	}
 }
+
+#ifdef PF_FIXED_CAL
+//A conservative raw ADC excursion bound while the current gain is unknown. The PA2/PA6
+//low-side samples at 1500 mV changed by tens of counts; 100 counts aborts a larger step.
+static uint8_t fixedPhaseExceeded(uint32_t mask, const int32_t* zero){
+	int32_t x[16];
+	sampleAvg(mask, 1, x, 16);
+	uint16_t p[2] = { IPHASEAPIN, IPHASEBPIN };
+	for(uint8_t i=0;i<2;i++){
+		int8_t c=AdcChannel(p[i]);
+		if(c<0) return 1;
+		int32_t d=x[(uint8_t)c]-zero[(uint8_t)c];
+		if(d>1600||d<-1600) return 1;    //16 samples * 100 ADC counts
+	}
+	return 0;
+}
+#endif
 
 //least squares of the bus pin's readings (counts) over the reference current xs (A), the points above the
 //adc's zero (a shunt's zero can be below it), rising steadily
@@ -611,6 +708,9 @@ static uint8_t busFit(uint16_t (*avg)[16], uint8_t c, const float* xs, float* a,
 }
 
 void DetectCurrent(int32_t mv, int32_t shunt_uohm){
+#ifdef PF_FIXED_CAL
+	(void)shunt_uohm;    //fixed build stops after the phase mapping; PA7 calibration is unchanged
+#endif
 	if(mv<=0) mv = 1000;
 	uint32_t mask = freeAdcMask();
 	int32_t zero[16], v[16];
@@ -622,11 +722,33 @@ void DetectCurrent(int32_t mv, int32_t shunt_uohm){
 	for(uint8_t k=0;k<12;k++){
 		FieldVector(k, mv);
 		Wait(60);
+#ifdef PF_FIXED_CAL
+		if(aborted()||VbatMv()<35000||VbatMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 		sampleAvg(mask, 1, v, 16);
+#ifdef PF_FIXED_CAL
+		for(uint8_t i=0;i<2;i++){
+			int8_t c=AdcChannel(i ? IPHASEBPIN : IPHASEAPIN);
+			int32_t delta=c<0 ? 1601 : v[(uint8_t)c]-zero[(uint8_t)c];
+			if(delta>1600||delta<-1600){ GatesOff(); err("phase ADC excursion exceeded 100 counts"); return; }
+		}
+#endif
 		for(uint8_t c=0;c<16;c++) d[k][c] = (int16_t)((v[c]-zero[c])/16);
 		progress(k+1, 12);
 	}
 	FieldVector(0, 0);
+#ifdef PF_FIXED_CAL
+	GatesOff();
+	for(uint8_t i=0;i<2;i++){
+		uint16_t p=i ? IPHASEBPIN : IPHASEAPIN;
+		int8_t c=AdcChannel(p);
+		if(c<0) continue;
+		kv("phase_zero"); outpin(p); outc(' '); outi(zero[(uint8_t)c]/16); nl();
+		kv("phase_delta"); outpin(p);
+		for(uint8_t k=0;k<12;k++){ outc(' '); outi(d[k][(uint8_t)c]); }
+		nl();
+	}
+#endif
 	progressEnd();
 	//per pin: the phase and sign with the largest correlation; amplitude = corr / 6000 counts
 	uint16_t pin[3] = { PIN_NONE, PIN_NONE, PIN_NONE };
@@ -651,8 +773,13 @@ void DetectCurrent(int32_t mv, int32_t shunt_uohm){
 	}
 	uint8_t n = (pin[0]!=PIN_NONE)+(pin[1]!=PIN_NONE)+(pin[2]!=PIN_NONE);
 	if(n<2){
+#ifdef PF_FIXED_CAL
+		err("PA2/PA6 phase-current mapping unavailable at this field voltage");
+		return;
+#else
 		IPHASEAPIN = IPHASEBPIN = PIN_NONE;
 		note("no phase current pins: no FOC");
+#endif
 	}else{
 		uint8_t a = pin[0]!=PIN_NONE ? 0 : 1, b = pin[2]!=PIN_NONE ? 2 : 1;    //pairs A,B / B,C / A,C
 		if(a==0&&pin[1]!=PIN_NONE&&b==2&&amp[1]>amp[2]) b = 1;
@@ -667,6 +794,13 @@ void DetectCurrent(int32_t mv, int32_t shunt_uohm){
 		int32_t r = (int32_t)cfgOrDefault(MOTOR_R, 300);
 		kvi("iphasegain_from_motorr", mv*10000/r/((amp[a]+amp[b])/2));    //0.1 mA per count
 	}
+#ifdef PF_FIXED_CAL
+	if(mv<600){
+		note("phase mapping only; PA7 R004 bus-current scale unchanged; no config saved");
+		ok();
+		return;
+	}
+#endif
 	//bus current pin: phase X high, the others low (k = 4X-7: cos = 1 for X), sampled in the active vector.
 	//Without phase current pins the reference is the static field's current V / motorr (phase A high): it
 	//finds the pin and its zero (the intercept, whatever the scale); the divider then needs the shunt value
@@ -687,12 +821,30 @@ void DetectCurrent(int32_t mv, int32_t shunt_uohm){
 	float xs[8], fr[8];
 	for(uint8_t s=0;s<8;s++){ xs[s] = 0; for(uint8_t c=0;c<16;c++) avg[s][c] = 0; }
 	FieldVector(kx, mv*5/2);    //the rotor aligns first: a swinging rotor changed the current between the samples
+#ifdef PF_FIXED_CAL
+	for(uint8_t i=0;i<10;i++){
+		Wait(50);
+		if(aborted()||VbatMv()<35000||VbatMv()>43000||fixedPhaseExceeded(mask,zero)){
+			GatesOff(); err("aborted, bus left 35..43 V, or phase ADC >100 counts"); return;
+		}
+	}
+#else
 	Wait(500);
+#endif
 	//3 passes: a 3 mOhm shunt is ~2.4 counts per A, the slope of one pass varied +-3 %
 	for(uint8_t pass=0;pass<3;pass++){
 		for(uint8_t s=0;s<8;s++){
 			FieldVector(kx, mv*(s+3)/4);
+#ifdef PF_FIXED_CAL
+			for(uint8_t i=0;i<3;i++){
+				Wait(50);
+				if(aborted()||VbatMv()<35000||VbatMv()>43000||fixedPhaseExceeded(mask,zero)){
+					GatesOff(); err("aborted, bus left 35..43 V, or phase ADC >100 counts"); return;
+				}
+			}
+#else
 			Wait(150);
+#endif
 			uint16_t at = (uint16_t)((fieldCcr[x]+fieldCcr[(x+1)%3])/2);    //middle of the active vector
 			fr[s] = (float)(fieldCcr[(x+1)%3]-fieldCcr[x])/(float)PWM_PERIOD;    //duty x - duty others
 			sampleAvg(mask, 1, v, 16);
@@ -725,10 +877,15 @@ void DetectCurrent(int32_t mv, int32_t shunt_uohm){
 		if(a>0.2f&&(best==PIN_NONE||(best!=ITOTALPIN&&(a>slope||p==ITOTALPIN)))){ slope = a; z = zz; best = p; }
 	}
 	if(best==PIN_NONE){
+#ifdef PF_FIXED_CAL
+		err("fixed-current calibration: PA7 bus-current fit unavailable at this field voltage");
+		return;
+#else
 		//a zero below adc 0 hides small currents (F031: a filtered pin reads 0 up to ~0.75 A average)
 		if(mv<1500){ note("no bus current pin above the adc zero: again at 1.5x the voltage"); DetectCurrent(mv*3/2, shunt_uohm); return; }
 		err("no bus current pin found");
 		return;
+#endif
 	}
 	//a filtered bus pin (RC on the shunt signal) reads the period's average everywhere, also in the zero
 	//vector where the shunt carries nothing: fitted against the active vector's current it read the average
@@ -739,6 +896,9 @@ void DetectCurrent(int32_t mv, int32_t shunt_uohm){
 		int32_t one[16], zv, av;
 		FieldVector(kx, mv*5/2);
 		Wait(150);
+#ifdef PF_FIXED_CAL
+		if(aborted()||VbatMv()<35000||VbatMv()>43000){ GatesOff(); err("aborted or bus left 35..43 V"); return; }
+#endif
 		sampleAvg(1u<<c, 1, one, 192); zv = one[c];
 		sampleAvg(1u<<c, (uint16_t)((fieldCcr[x]+fieldCcr[(x+1)%3])/2), one, 192); av = one[c];
 		FieldVector(0, 0);

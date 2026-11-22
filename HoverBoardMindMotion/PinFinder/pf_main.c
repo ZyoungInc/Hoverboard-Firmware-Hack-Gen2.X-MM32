@@ -37,12 +37,24 @@ int main(void){
 	CfgDefaults();    //the extension words stay default if the board has no extension record
 	if(ConfigLoad()) ConfigMigrate();
 	CfgMarkSaved();
+#ifdef PF_FIXED_CAL
+	//This target is for the measured Ghost board only. Keep the values in RAM; the Flash config
+	//is intentionally not changed by calibration firmware.
+	if(ITOTALPIN==PA7&&IPHASEAPIN==PA2&&IPHASEBPIN==PA6){
+		if(IPHASE_CFG==0xFFFF) IPHASE_CFG = 1;       //PA2=B, PA6=C, both falling with positive current
+		if(IPHASE_GAIN==0xFFFF) IPHASE_GAIN = 354;   //R004 fit, median of three measurements
+	}
+#endif
 	LatchHold();    //first: the user may be holding the power button
 	MotorInit();
 	AdcInit();
+#if defined(PF_HALL_ONLY) || defined(PF_FIXED_CAL)
+	if(TXPIN>=PINCOUNT||RXPIN>=PINCOUNT) for(;;);    //fixed config required; no UART pin search
+#else
 	if(TXPIN>=PINCOUNT||RXPIN>=PINCOUNT){
 		while(!UartFind());    //the user connects the board's TX and RX together
 	}
+#endif
 	uartUsed = UART_GPIO_Init();
 	for(uint8_t i=0;i<UARTCOUNT;i++){    //push-pull: one terminal on the line, not the RemoteUartBus
 		if(uarts[i].io==TXPIN&&uarts[i].tx) pinMode(TXPIN, OUTPUT_AF);
@@ -52,6 +64,19 @@ int main(void){
 	SerialInit();
 	IoInit(uartUsed);
 
+#if defined(PF_HALL_ONLY) || defined(PF_FIXED_CAL)
+	agent = 1;
+	#ifdef PF_FIXED_CAL
+	out("Fixed motor calibration: @detect current [200..500 phase, 600 or 1400 gain], @calibrate hall 1500|2000|3000|4000|5000, @calibrate rl 1500");
+	#else
+	out("Fixed Hall mapping: @calibrate hallmap [mV], @hall, @get <name>");
+	#endif
+	nl();
+	while(1){
+		int c = inbyte();
+		if(c>=0) agentByte(c);
+	}
+#else
 	uint8_t started = 0;
 	uint32_t banner = millis-2000;
 	while(1){
@@ -73,4 +98,5 @@ int main(void){
 		}
 		if(!agent) TuiPoll();
 	}
+#endif
 }
